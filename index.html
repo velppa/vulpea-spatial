@@ -87,6 +87,12 @@
     color:var(--accent); text-decoration:none; font-weight:500;
     border-bottom:1px dashed var(--accent); cursor:pointer;
   }
+  .emacs-open{cursor:pointer; display:inline-flex; vertical-align:middle; margin-left:6px;}
+  .emacs-open svg{width:15px; height:15px;}
+  #lb-text pre{overflow-x:auto; background:rgba(0,0,0,.05); padding:8px; font-size:12px;}
+  #lb-text table{border-collapse:collapse; margin:8px 0;}
+  #lb-text td, #lb-text th{border:1px solid var(--border); padding:2px 8px;}
+  #lb-text h1, #lb-text h2, #lb-text h3, #lb-text h4{margin:14px 0 6px;}
   a.id-link:hover{
     border-bottom-style:solid; background:rgba(0,0,128,0.08);
   }
@@ -181,6 +187,20 @@
   <span id="lb-close">&times;</span>
   <div id="lb-inner"></div>
 </div>
+
+<svg width="0" height="0" style="position:absolute" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="emacs-icon" viewBox="0 0 512 512">
+    <defs>
+      <linearGradient id="eg" x1="0.15" y1="0.1" x2="0.85" y2="0.9">
+        <stop offset="0" stop-color="#8381c5"/>
+        <stop offset="0.57" stop-color="#7e55b3"/>
+        <stop offset="1" stop-color="#a52ecb"/>
+      </linearGradient>
+    </defs>
+    <circle cx="255.1" cy="256.9" r="228" fill="url(#eg)" stroke="#452e70" stroke-width="17"/>
+    <path fill="#fff" d="m 175.0003,422.31057 c 0,0 19.7385,1.39634 45.1312,-0.84159 10.2834,-0.9063 49.3267,-4.74128 78.5169,-11.14289 0,0 35.5899,-7.61669 54.6301,-14.63335 19.9225,-7.34185 30.7636,-13.57304 35.6433,-22.40243 -0.2128,-1.80907 1.5024,-8.22438 -7.685,-12.07788 -23.4887,-9.85199 -50.73,-8.06998 -104.6338,-9.21285 -59.7772,-2.05391 -79.6627,-12.05971 -90.2556,-20.11838 -10.1579,-8.17519 -5.05,-30.79254 38.4742,-50.71499 21.9244,-10.60898 107.8705,-30.18698 107.8705,-30.18698 -28.9451,-14.30725 -82.9186,-39.45893 -94.0134,-44.89023 -9.7308,-4.76348 -25.303,-11.93595 -28.6785,-20.61368 -3.8271,-8.33089 9.0383,-15.50726 16.2248,-17.56236 23.1448,-6.67602 55.8182,-10.82538 85.5548,-11.29122 14.9472,-0.23417 17.3734,-1.19586 17.3734,-1.19586 20.6243,-3.42116 34.2014,-17.53175 28.5446,-39.87876 -5.0783,-22.81046 -31.8617,-36.21365 -57.3138,-31.57361 -23.9682,4.36956 -81.7378,21.15007 -81.7378,21.15007 71.4075,-0.61803 83.3592,0.57378 88.697,8.03676 3.1523,4.40742 -1.4324,10.45068 -20.4765,13.56099 -20.733,3.38616 -63.8312,7.46399 -63.8312,7.46399 -41.3449,2.4554 -70.4682,2.61974 -79.203,21.11314 -5.7065,12.08196 6.0854,22.7633 11.2538,29.4493 21.8407,24.28905 53.3882,37.38879 73.6948,47.03553 7.6405,3.62963 30.0586,10.48407 30.0586,10.48407 -65.8782,-3.62335 -113.4003,16.6055 -141.2764,39.89622 -31.5288,29.16261 -17.581403,63.92354 47.0124,85.3268 38.1517,12.6416 57.0725,18.58695 113.9815,13.46232 33.52,-1.80673 38.8041,-0.73155 39.1383,2.01892 0.4705,3.87242 -37.2311,13.49165 -47.524,16.4606 -26.1853,7.55306 -94.8276,22.80438 -95.1712,22.87835 z"/>
+  </symbol>
+</svg>
 
 <script>
 const canvas = document.getElementById('canvas');
@@ -496,7 +516,7 @@ function render(){
       const parsed = item._parsed;
       const bottomTagText = parsed.tags.length ? parsed.tags.map(t=>'#'+t).join(' ') : tagsString;
       const bottomDateText = parsed.date || '';
-      el.innerHTML = `<div class="snippet">${parsed.html}</div><div class="cap"><span>${escapeHtml(bottomTagText)}</span><span>${escapeHtml(bottomDateText)}</span></div>`;
+      el.innerHTML = `<div class="snippet">${parsed.html}</div><div class="cap"><span>${escapeHtml(bottomTagText)}</span><span>${escapeHtml(bottomDateText)}${emacsButtonHtml(item)}</span></div>`;
     }
     const rs = document.createElement('div');
     rs.className = 'resize';
@@ -615,25 +635,42 @@ async function openLightbox(item){
   const tagList = (item.tags||[]).map(t => '#'+t).join(' ');
   // text notes already render their title in the body
   const capTitle = item.type === 'text' ? '' : item.title;
-  inner.innerHTML = body + `<div id="lb-cap"><span>${escapeHtml(tagList)}</span><span>${escapeHtml(capTitle)}</span></div>`;
+  const emacsBtn = item.type === 'text' ? emacsButtonHtml(item) : '';
+  inner.innerHTML = body + `<div id="lb-cap"><span>${escapeHtml(tagList)}</span><span>${emacsBtn}${escapeHtml(capTitle)}</span></div>`;
   document.getElementById('lightbox').classList.add('open');
-  
+
   if(item.type === 'text'){
+    const el = document.getElementById('lb-text');
+    const titleHtml = item.title ? `<div class="org-title">${escapeHtml(item.title)}</div>` : '';
+    try {
+      // rendered through the live Emacs; raw org is the fallback
+      const r = await fetch('/api/html?path=' + encodeURIComponent(relOf(item)));
+      if(r.ok){
+        if(el) el.innerHTML = titleHtml + await r.text();
+        return;
+      }
+      throw new Error('export failed');
+    } catch(e) {}
     try {
       const txt = await fetch(item.src).then(r => r.text());
-      const el = document.getElementById('lb-text');
-      if(el){
-        const parsed = parseOrgNote(txt, item.title);
-        el.innerHTML = parsed.html;
-      }
+      if(el) el.innerHTML = parseOrgNote(txt, item.title).html;
     } catch(e) {
-      const el = document.getElementById('lb-text');
-      if(el){
-        const parsed = parseOrgNote(item.snippet, item.title);
-        el.innerHTML = parsed.html;
-      }
+      if(el) el.innerHTML = parseOrgNote(item.snippet, item.title).html;
     }
   }
+}
+
+function relOf(item){
+  return decodeURIComponent((item.src||'').replace(/^\/media\//, ''));
+}
+
+function emacsButtonHtml(item){
+  return `<a class="emacs-open" title="open in Emacs" onclick="openInEmacs(event, '${encodeURIComponent(relOf(item))}')"><svg viewBox="0 0 512 512"><use href="#emacs-icon"/></svg></a>`;
+}
+
+function openInEmacs(e, rel){
+  e.stopPropagation();
+  fetch('/api/open?path=' + rel);
 }
 document.getElementById('lb-close').onclick = closeLightbox;
 document.getElementById('lightbox').addEventListener('click', e => {

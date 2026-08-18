@@ -158,6 +158,57 @@ def build_index(root: Path, db: Path):
     return items, links, id_to_card
 
 
+def _emacs_env():
+    """The Emacs daemon socket lives in DARWIN_USER_TEMP_DIR on macOS."""
+    env = dict(os.environ)
+    try:
+        out = subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            env["TMPDIR"] = out.stdout.strip()
+    except Exception:
+        pass
+    return env
+
+
+EMACS_ENV = _emacs_env()
+
+
+def emacsclient(sexp, timeout=30):
+    out = subprocess.run(["emacsclient", "-e", sexp], env=EMACS_ENV,
+                         capture_output=True, text=True, timeout=timeout)
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr.strip() or out.stdout.strip())
+    return out.stdout.strip()
+
+
+def org_to_html(path: Path):
+    """Render an org note to body-only HTML through the live Emacs.
+    The elisp helper writes to a temp file, sidestepping emacsclient's
+    stdout mangling of long results."""
+    tmp = emacsclient(f'(vulpea-spatial-export-html "{path}")')
+    tmp = json.loads(tmp)  # returned file name is an elisp-quoted string
+    html = Path(tmp).read_text(errors="ignore")
+    os.unlink(tmp)
+    return html
+
+
+def open_in_emacs(path: Path):
+    """Raise Emacs, then visit PATH.  Activation goes first: it needs
+    an idle Emacs, and the visit makes Emacs busy."""
+    if shutil.which("hs"):
+        activate = ["hs", "-c", 'hs.application.get("Emacs"):activate()']
+    else:
+        activate = ["osascript", "-e", 'tell application "Emacs" to activate']
+    try:
+        subprocess.run(activate, capture_output=True, timeout=10)
+    except Exception:
+        pass
+    emacsclient(
+        f'(progn (find-file "{path}") (select-frame-set-input-focus (selected-frame)))',
+        timeout=10)
+
+
 _index_cache = {"mtime": None, "data": None}
 
 
@@ -186,6 +237,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _note_path(self, parsed):
+        """Resolve the ?path= query parameter to a file under NOTES_DIR."""
+        rel = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+        fp = (NOTES_DIR / rel).resolve()
+        if not str(fp).startswith(str(NOTES_DIR.resolve())) or not fp.is_file():
+            return None
+        return fp
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
@@ -204,6 +263,32 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json(json.loads(LAYOUT_FILE.read_text()))
             else:
                 self._send_json({})
+        elif parsed.path == "/api/html":
+            fp = self._note_path(parsed)
+            if fp is None:
+                self.send_error(404)
+                return
+            try:
+                html = org_to_html(fp).encode()
+            except Exception as e:
+                self.send_error(500, str(e).splitlines()[0][:200] if str(e) else "export failed")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.end_headers()
+            self.wfile.write(html)
+        elif parsed.path == "/api/open":
+            fp = self._note_path(parsed)
+            if fp is None:
+                self.send_error(404)
+                return
+            try:
+                open_in_emacs(fp)
+            except Exception as e:
+                self.send_error(500, str(e).splitlines()[0][:200] if str(e) else "open failed")
+                return
+            self._send_json({"ok": True})
         elif parsed.path.startswith("/media/"):
             rel = urllib.parse.unquote(parsed.path[len("/media/"):])
             fp = (NOTES_DIR / rel).resolve()
