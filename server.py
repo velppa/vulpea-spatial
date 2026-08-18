@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Local gallery server for a denote directory.
-Read/arrange-only canvas: browses your denote notes+media spatially,
+Local gallery server for a Vulpea notes directory.
+Read/arrange-only canvas: browses your Vulpea notes+media spatially,
 saves only x/y/size positions back to disk (never touches your notes).
 
+Notes, tags, and the link graph come from the vulpea database
+(vulpea-db-autosync-mode keeps it fresh); note files are read only for
+card snippets, and media files are picked up by a directory scan.
+
 Usage:
-    python3 server.py /path/to/your/denote/dir [port]
+    python3 server.py /path/to/your/notes/dir [port] [/path/to/vulpea.db]
 
 Then open http://localhost:PORT
 """
@@ -13,6 +17,9 @@ import http.server
 import json
 import os
 import re
+import shutil
+import sqlite3
+import subprocess
 import sys
 import threading
 import urllib.parse
@@ -21,91 +28,151 @@ from pathlib import Path
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg"}
 VID_EXT = {".mp4", ".webm", ".mov"}
-TEXT_EXT = {".md", ".org", ".txt"}
 PDF_EXT = {".pdf"}
 
 
 HERE = Path(__file__).parent.resolve()
 LAYOUT_FILE = HERE / "layout.json"
 CONFIG_FILE = HERE / ".config.json"
-
-# --- denote filename parsing: YYYYMMDDTHHMMSS--title-words__tag1_tag2.ext
-DENOTE_RE = re.compile(r"^(\d{8}T\d{6})--([^_]+)(?:__(.+))?$")
+DEFAULT_DB = "~/.config/emacs/vulpea.db"
 
 
-def parse_denote_name(stem):
-    m = DENOTE_RE.match(stem)
+def _j(value, default=None):
+    """Vulpea stores every db value JSON-encoded; decode with a default.
+    Collection columns (tags, ...) are encoded twice - a JSON string
+    holding JSON - so decode again when a string decodes to more JSON."""
+    while isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            break
+    return default if value is None else value
+
+
+def query_notes(db: Path, root: Path):
+    """Read note cards, the id link graph, and the id->card map from vulpea.db.
+
+    A card is a file-level (level 0) note under ROOT.  Heading-level
+    notes map to their file's card, so links to and from headings
+    resolve at the card level.
+    """
+    prefix = json.dumps(str(root) + "/")[:-1]  # quoted path prefix for LIKE
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "SELECT id, path, level, title, tags FROM notes WHERE path LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+        link_rows = con.execute(
+            "SELECT source, dest FROM links WHERE type = ?", (json.dumps("id"),)
+        ).fetchall()
+    finally:
+        con.close()
+
+    items = []
+    path_to_card = {}  # note file path -> its file-level note id
+    for note_id, path, level, title, tags in rows:
+        if level != 0:
+            continue
+        path_to_card[_j(path)] = _j(note_id)
+        items.append({
+            "id": _j(note_id),
+            "title": _j(title, ""),
+            "tags": _j(tags, []),
+            "path": _j(path),
+        })
+
+    id_to_card = {}  # any note id (headings included) -> its file's card id
+    for note_id, path, level, title, tags in rows:
+        card = path_to_card.get(_j(path))
+        if card:
+            id_to_card[_j(note_id)] = card
+
+    links = set()
+    for source, dest in link_rows:
+        src_card = id_to_card.get(_j(source))
+        dst_card = id_to_card.get(_j(dest))
+        if src_card and dst_card and src_card != dst_card:
+            links.add(tuple(sorted([src_card, dst_card])))
+    return items, sorted(links), id_to_card
+
+
+def parse_media_name(stem):
+    """Best-effort title/tags for a media file (no metadata inside)."""
+    m = re.match(r"^(?:\d{8}T\d{6}--)?([^_]+)(?:__(.+))?$", stem)
     if not m:
-        return {"id": stem, "title": stem.replace("-", " "), "tags": []}
-    denote_id, title_slug, tags = m.groups()
+        return {"title": stem.replace("-", " "), "tags": []}
+    title_slug, tags = m.groups()
     return {
-        "id": denote_id,
         "title": title_slug.replace("-", " "),
         "tags": tags.split("_") if tags else [],
     }
 
 
-def text_snippet(path, n=400):
-    try:
-        raw = path.read_text(errors="ignore")
-    except Exception:
-        return ""
-    # strip org/md front matter-ish lines (#+TITLE:, ---, etc.)
-    lines = [l for l in raw.splitlines() if not l.strip().startswith(("#+", "---"))]
+def text_snippet(text, n=400):
+    # strip org keywords, property drawers, and drawer-ish lines
+    lines = [
+        l
+        for l in text.splitlines()
+        if not l.strip().startswith(("#+", "---", ":"))
+    ]
     body = "\n".join(lines).strip()
     return body[:n]
 
 
-ID_RE = re.compile(r"\d{8}T\d{6}")
+def build_index(root: Path, db: Path):
+    notes, links, id_to_card = query_notes(db, root)
 
-
-def build_index(root: Path):
     items = []
-    texts = []  # (denote_id, full_text) for link detection
+    for note in notes:
+        p = Path(note.pop("path"))
+        try:
+            rel = p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        try:
+            full = p.read_text(errors="ignore")
+        except Exception:
+            full = ""
+        items.append({
+            **note,
+            "type": "text",
+            "snippet": text_snippet(full),
+            "src": "/media/" + urllib.parse.quote(rel),
+        })
+
     for p in sorted(root.rglob("*")):
         if p.is_dir() or p.name.startswith("."):
             continue
+        if any(part.startswith(".") for part in p.relative_to(root).parts):
+            continue
         ext = p.suffix.lower()
         rel = p.relative_to(root).as_posix()
-        if not DENOTE_RE.match(p.stem):
-            continue
-        meta = parse_denote_name(p.stem)
+        src = "/media/" + urllib.parse.quote(rel)
         if ext in IMG_EXT:
-            items.append({**meta, "type": "image", "src": "/media/" + urllib.parse.quote(rel)})
+            items.append({"id": rel, **parse_media_name(p.stem), "type": "image", "src": src})
         elif ext in VID_EXT:
-            items.append({**meta, "type": "video", "src": "/media/" + urllib.parse.quote(rel)})
+            items.append({"id": rel, **parse_media_name(p.stem), "type": "video", "src": src})
         elif ext in PDF_EXT:
-            items.append({**meta, "type": "pdf", "src": "/media/" + urllib.parse.quote(rel), "snippet": "[PDF Document]"})
-        elif ext in TEXT_EXT:
-            try:
-                full = p.read_text(errors="ignore")
-            except Exception:
-                full = ""
-            items.append({**meta, "type": "text", "snippet": text_snippet(p),
-                          "src": "/media/" + urllib.parse.quote(rel)})
-            texts.append((meta["id"], full))
-
-    # detect denote-id cross-references inside note bodies -> link graph
-    all_ids = {it["id"] for it in items}
-    links = []
-    for denote_id, full in texts:
-        for match in set(ID_RE.findall(full)):
-            if match != denote_id and match in all_ids:
-                pair = tuple(sorted([denote_id, match]))
-                if pair not in links:
-                    links.append(pair)
-    return items, links
+            items.append({"id": rel, **parse_media_name(p.stem), "type": "pdf", "src": src, "snippet": "[PDF Document]"})
+    return items, links, id_to_card
 
 
 _index_cache = {"mtime": None, "data": None}
 
 
+def current_mtime():
+    """Freshness marker: the database changes on any note edit, the
+    directory on media add/remove."""
+    return max(DB_FILE.stat().st_mtime, NOTES_DIR.stat().st_mtime)
+
+
 def get_index_cached():
-    """Rebuild the index only when the denote dir has actually changed."""
-    mtime = DENOTE_DIR.stat().st_mtime
+    """Rebuild the index only when the notes have actually changed."""
+    mtime = current_mtime()
     if _index_cache["mtime"] != mtime or _index_cache["data"] is None:
-        items, links = build_index(DENOTE_DIR)
-        _index_cache["data"] = {"items": items, "links": links}
+        items, links, idmap = build_index(NOTES_DIR, DB_FILE)
+        _index_cache["data"] = {"items": items, "links": links, "idmap": idmap}
         _index_cache["mtime"] = mtime
     return _index_cache["data"]
 
@@ -131,7 +198,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == "/api/index":
             self._send_json(get_index_cached())
         elif parsed.path == "/api/stat":
-            self._send_json({"mtime": DENOTE_DIR.stat().st_mtime})
+            self._send_json({"mtime": current_mtime()})
         elif parsed.path == "/api/layout":
             if LAYOUT_FILE.exists():
                 self._send_json(json.loads(LAYOUT_FILE.read_text()))
@@ -139,8 +206,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({})
         elif parsed.path.startswith("/media/"):
             rel = urllib.parse.unquote(parsed.path[len("/media/"):])
-            fp = (DENOTE_DIR / rel).resolve()
-            if not str(fp).startswith(str(DENOTE_DIR.resolve())) or not fp.exists():
+            fp = (NOTES_DIR / rel).resolve()
+            if not str(fp).startswith(str(NOTES_DIR.resolve())) or not fp.exists():
                 self.send_error(404)
                 return
             self.send_response(200)
@@ -170,13 +237,14 @@ def guess_type(fp: Path):
         ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
         ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
         ".pdf": "application/pdf",
-        ".md": "text/plain", ".org": "text/plain", ".txt": "text/plain",
+        ".org": "text/plain",
     }.get(ext, "application/octet-stream")
 
 
 if __name__ == "__main__":
-    denote_dir = sys.argv[1] if len(sys.argv) > 1 else None
+    notes_dir = sys.argv[1] if len(sys.argv) > 1 else None
     port = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    db = sys.argv[3] if len(sys.argv) > 3 else None
 
     cfg = {}
     if CONFIG_FILE.exists():
@@ -185,23 +253,31 @@ if __name__ == "__main__":
         except Exception:
             cfg = {}
 
-    if denote_dir is None:
-        denote_dir = cfg.get("denote_dir")
-        if denote_dir is None:
-            denote_dir = input("Path to your denote folder: ").strip()
+    if notes_dir is None:
+        notes_dir = cfg.get("notes_dir")
+        if notes_dir is None:
+            notes_dir = input("Path to your notes folder: ").strip()
     if port is None:
         port = cfg.get("port", 8420)
+    if db is None:
+        db = cfg.get("db", DEFAULT_DB)
 
-    DENOTE_DIR = Path(denote_dir).expanduser().resolve()
-    if not DENOTE_DIR.is_dir():
-        print(f"Not a directory: {DENOTE_DIR}")
+    NOTES_DIR = Path(notes_dir).expanduser().resolve()
+    if not NOTES_DIR.is_dir():
+        print(f"Not a directory: {NOTES_DIR}")
         sys.exit(1)
 
-    CONFIG_FILE.write_text(json.dumps({"denote_dir": str(DENOTE_DIR), "port": port}))
+    DB_FILE = Path(db).expanduser().resolve()
+    if not DB_FILE.is_file():
+        print(f"vulpea database not found: {DB_FILE}")
+        sys.exit(1)
+
+    CONFIG_FILE.write_text(json.dumps(
+        {"notes_dir": str(NOTES_DIR), "port": port, "db": str(DB_FILE)}))
 
     url = f"http://localhost:{port}"
-    print(f"Serving {DENOTE_DIR} at {url}")
+    print(f"Serving {NOTES_DIR} at {url}")
     print("(local only — not reachable from other machines)")
-    if not os.environ.get("DENOTE_SPATIAL_NO_OPEN"):
+    if not os.environ.get("VULPEA_SPATIAL_NO_OPEN"):
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     http.server.HTTPServer(("localhost", port), Handler).serve_forever()

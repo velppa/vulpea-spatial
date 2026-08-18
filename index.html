@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>denote-spatial</title>
+<title>vulpea-spatial</title>
 <style>
   :root{
     --bg:#ffffff; --card:#ffffff; --ink:#1a1a1a; --sub:#757065;
@@ -83,11 +83,11 @@
     margin-bottom:6px; line-height:1.2;
   }
 
-  a.denote-link{
+  a.id-link{
     color:var(--accent); text-decoration:none; font-weight:500;
     border-bottom:1px dashed var(--accent); cursor:pointer;
   }
-  a.denote-link:hover{
+  a.id-link:hover{
     border-bottom-style:solid; background:rgba(0,0,128,0.08);
   }
 
@@ -160,7 +160,7 @@
 </head>
 <body>
 <div id="topbar">
-  <b>denote-spatial</b>
+  <b>vulpea-spatial</b>
   <span id="count"></span>
   <input type="text" id="search" placeholder="Search / Regex / #tag..." />
   <span style="flex:1"></span>
@@ -188,6 +188,7 @@ const viewport = document.getElementById('viewport');
 let layout = {chrono:{}, feed:{}, connected:{}, keyword:{}};
 let items = [];
 let links = [];
+let idmap = {};
 let mode = 'chrono';
 const cardEls = {};
 let selected = new Set();
@@ -225,28 +226,35 @@ function parseOrgNote(text, itemTitle){
       if(k === 'title') title = val.trim();
       else if(k === 'filetags') tags = val.split(':').filter(Boolean);
       else if(k === 'date') date = val.replace(/[\[\]]/g,'').trim();
+    } else if(/^\s*:[A-Za-z0-9_@+-]+:/.test(line)) {
+      // property/logbook drawer line — metadata, not body
     } else {
       bodyLines.push(line);
     }
   });
 
-  const bodyHtml = parseDenoteLinks(bodyLines.join('\n').trim());
+  const bodyHtml = parseOrgLinks(bodyLines.join('\n').trim());
   const titleHtml = title ? `<div class="org-title">${escapeHtml(title)}</div>` : '';
 
   return { html: titleHtml + bodyHtml, date, tags };
 }
 
-function parseDenoteLinks(text){
+function parseOrgLinks(text){
   if(!text) return '';
   const escaped = escapeHtml(text);
-  return escaped.replace(/\[\[denote:([0-9T]+)\]\[(.*?)\]\]/g, (match, id, title) => {
-    return `<a class="denote-link" onclick="handleDenoteLinkClick(event, '${id}')">${title}</a>`;
-  });
+  return escaped
+    .replace(/\[\[id:([^\]\[]+)\]\[(.*?)\]\]/g, (match, id, title) => {
+      return `<a class="id-link" onclick="handleIdLinkClick(event, '${id}')">${title}</a>`;
+    })
+    .replace(/\[\[id:([^\]\[]+)\]\]/g, (match, id) => {
+      return `<a class="id-link" onclick="handleIdLinkClick(event, '${id}')">${id}</a>`;
+    });
 }
 
-function handleDenoteLinkClick(e, targetId){
+function handleIdLinkClick(e, targetId){
   e.stopPropagation();
-  const targetItem = items.find(it => it.id === targetId);
+  const cardId = idmap[targetId] || targetId;
+  const targetItem = items.find(it => it.id === cardId);
   if(targetItem){
     openLightbox(targetItem);
   } else {
@@ -336,7 +344,7 @@ async function load(){
     fetch('/api/index').then(r=>r.json()),
     fetch('/api/layout').then(r=>r.json())
   ]);
-  items = idx.items; links = idx.links || [];
+  items = idx.items; links = idx.links || []; idmap = idx.idmap || {};
   if(lay && !('chrono' in lay) && !('connected' in lay) && !('keyword' in lay) && !('feed' in lay)){
     layout = {chrono: lay, feed:{}, connected:{}, keyword:{}};
   } else {
@@ -344,7 +352,7 @@ async function load(){
   }
   document.getElementById('count').textContent = items.length + ' items';
   if(items.length === 0){
-    document.getElementById('empty').textContent = 'No items found in your denote folder yet.';
+    document.getElementById('empty').textContent = 'No items found in your notes folder yet.';
     return;
   }
   render();
@@ -487,7 +495,7 @@ function render(){
       if(!item._parsed) item._parsed = parseOrgNote(item.snippet, item.title);
       const parsed = item._parsed;
       const bottomTagText = parsed.tags.length ? parsed.tags.map(t=>'#'+t).join(' ') : tagsString;
-      const bottomDateText = parsed.date || item.id;
+      const bottomDateText = parsed.date || '';
       el.innerHTML = `<div class="snippet">${parsed.html}</div><div class="cap"><span>${escapeHtml(bottomTagText)}</span><span>${escapeHtml(bottomDateText)}</span></div>`;
     }
     const rs = document.createElement('div');
@@ -605,7 +613,9 @@ async function openLightbox(item){
   }
   
   const tagList = (item.tags||[]).map(t => '#'+t).join(' ');
-  inner.innerHTML = body + `<div id="lb-cap"><span>${escapeHtml(tagList)}</span><span>${escapeHtml(item.id)}</span></div>`;
+  // text notes already render their title in the body
+  const capTitle = item.type === 'text' ? '' : item.title;
+  inner.innerHTML = body + `<div id="lb-cap"><span>${escapeHtml(tagList)}</span><span>${escapeHtml(capTitle)}</span></div>`;
   document.getElementById('lightbox').classList.add('open');
   
   if(item.type === 'text'){

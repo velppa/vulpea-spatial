@@ -1,0 +1,4 @@
+.config.json
+layout.json
+__pycache__/
+*.elc
