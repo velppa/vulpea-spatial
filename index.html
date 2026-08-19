@@ -89,10 +89,19 @@
   }
   .emacs-open{cursor:pointer; display:inline-flex; vertical-align:middle; margin-left:6px;}
   .emacs-open svg{width:15px; height:15px;}
-  #lb-text pre{overflow-x:auto; background:rgba(0,0,0,.05); padding:8px; font-size:12px;}
+  /* exported HTML carries its own structure; pre-wrap is only for raw org */
+  #lb-text.org-html{white-space:normal;}
+  #lb-text.org-html p, #lb-text.org-html ul, #lb-text.org-html ol, #lb-text.org-html dl{margin:8px 0;}
+  #lb-text pre{overflow-x:auto; background:rgba(0,0,0,.05); padding:8px; font-size:12px; white-space:pre;}
   #lb-text table{border-collapse:collapse; margin:8px 0;}
   #lb-text td, #lb-text th{border:1px solid var(--border); padding:2px 8px;}
   #lb-text h1, #lb-text h2, #lb-text h3, #lb-text h4{margin:14px 0 6px;}
+  /* note title tops the heading scale */
+  #lb-text .org-title{font-size:26px; margin:0 0 14px;}
+  #lb-text.org-html h1{font-size:22px;}
+  #lb-text.org-html h2{font-size:19px;}
+  #lb-text.org-html h3{font-size:17px;}
+  #lb-text.org-html h4, #lb-text.org-html h5, #lb-text.org-html h6{font-size:15.5px;}
   a.id-link:hover{
     border-bottom-style:solid; background:rgba(0,0,128,0.08);
   }
@@ -263,7 +272,7 @@ function parseOrgLinks(text){
   if(!text) return '';
   const escaped = escapeHtml(text);
   return escaped
-    .replace(/\[\[id:([^\]\[]+)\]\[(.*?)\]\]/g, (match, id, title) => {
+    .replace(/\[\[id:([^\]\[]+)\]\[([\s\S]*?)\]\]/g, (match, id, title) => {
       return `<a class="id-link" onclick="handleIdLinkClick(event, '${id}')">${title}</a>`;
     })
     .replace(/\[\[id:([^\]\[]+)\]\]/g, (match, id) => {
@@ -646,7 +655,10 @@ async function openLightbox(item){
       // rendered through the live Emacs; raw org is the fallback
       const r = await fetch('/api/html?path=' + encodeURIComponent(relOf(item)));
       if(r.ok){
-        if(el) el.innerHTML = titleHtml + await r.text();
+        if(el){
+          el.classList.add('org-html');
+          el.innerHTML = titleHtml + await r.text();
+        }
         return;
       }
       throw new Error('export failed');
