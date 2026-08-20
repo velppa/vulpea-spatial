@@ -5,8 +5,17 @@
 <title>vulpea-spatial</title>
 <style>
   :root{
+    color-scheme:light dark;
     --bg:#ffffff; --card:#ffffff; --ink:#1a1a1a; --sub:#757065;
     --accent:#000080; --border:#000000; --topbar-bg:rgba(255,255,255,.92);
+    --on-accent:#ffffff; --accent-wash:rgba(0,0,128,.08); --code-bg:rgba(0,0,0,.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#121212; --card:#1c1c1e; --ink:#e8e6e3; --sub:#9a948a;
+      --accent:#8fa3ff; --border:#47474d; --topbar-bg:rgba(18,18,18,.92);
+      --on-accent:#10121a; --accent-wash:rgba(143,163,255,.14); --code-bg:rgba(255,255,255,.08);
+    }
   }
   *{box-sizing:border-box}
   body{
@@ -30,7 +39,7 @@
   #topbar input{outline:none; width:160px}
   #topbar input:focus{border-color:var(--accent)}
   #topbar button:hover{border-color:var(--accent); color:var(--accent)}
-  #topbar button.active{background:var(--accent); color:#fff; border-color:var(--accent)}
+  #topbar button.active{background:var(--accent); color:var(--on-accent); border-color:var(--accent)}
   .glabel{
     position:absolute; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
     color:var(--accent); font-weight:600;
@@ -92,7 +101,7 @@
   /* exported HTML carries its own structure; pre-wrap is only for raw org */
   #lb-text.org-html{white-space:normal;}
   #lb-text.org-html p, #lb-text.org-html ul, #lb-text.org-html ol, #lb-text.org-html dl{margin:8px 0;}
-  #lb-text pre{overflow-x:auto; background:rgba(0,0,0,.05); padding:8px; font-size:12px; white-space:pre;}
+  #lb-text pre{overflow-x:auto; background:var(--code-bg); padding:8px; font-size:12px; white-space:pre;}
   #lb-text table{border-collapse:collapse; margin:8px 0;}
   #lb-text td, #lb-text th{border:1px solid var(--border); padding:2px 8px;}
   #lb-text h1, #lb-text h2, #lb-text h3, #lb-text h4{margin:14px 0 6px;}
@@ -103,7 +112,7 @@
   #lb-text.org-html h3{font-size:17px;}
   #lb-text.org-html h4, #lb-text.org-html h5, #lb-text.org-html h6{font-size:15.5px;}
   a.id-link:hover{
-    border-bottom-style:solid; background:rgba(0,0,128,0.08);
+    border-bottom-style:solid; background:var(--accent-wash);
   }
 
   /* --- Feed Mode --- */
@@ -599,15 +608,72 @@ function filterCards(){
     if(matches && !firstMatchEl) firstMatchEl = el;
   });
 
+  // grid mode: pack matches together instead of leaving gaps
+  if(mode === 'chrono'){
+    if(q){
+      compactVisible();
+      searchCompact = true;
+    } else if(searchCompact){
+      restorePositions();
+      searchCompact = false;
+    }
+  }
+
   if(q && firstMatchEl){
-    centerOnElement(firstMatchEl);
+    viewTopLeft(topLeftVisible() || firstMatchEl);
   }
 }
 
-let _searchDebounce = null;
-document.getElementById('search').addEventListener('input', () => {
-  clearTimeout(_searchDebounce);
-  _searchDebounce = setTimeout(filterCards, 80);
+// pan so EL sits at the viewport's top-left corner
+function viewTopLeft(el){
+  if(!el || mode === 'feed') return;
+  pan.x = 40 - el.offsetLeft * pan.scale;
+  pan.y = 40 - el.offsetTop * pan.scale;
+  applyPan();
+}
+
+function topLeftVisible(){
+  let best = null;
+  Object.values(cardEls).forEach(el => {
+    if(el.style.display === 'none') return;
+    if(!best
+       || el.offsetTop < best.offsetTop - 1
+       || (Math.abs(el.offsetTop - best.offsetTop) <= 1 && el.offsetLeft < best.offsetLeft)){
+      best = el;
+    }
+  });
+  return best;
+}
+
+let searchCompact = false;
+
+function compactVisible(){
+  // temporary gapless grid for the matching cards; saved layout untouched
+  [...items]
+    .sort((a,b) => b.id.localeCompare(a.id))
+    .map(it => cardEls[keyOf(it)])
+    .filter(el => el && el.style.display !== 'none')
+    .forEach((el, i) => {
+      const p = gridPos(i, 6, 220, 220, 20);
+      el.style.left = p.x + 'px';
+      el.style.top = p.y + 'px';
+    });
+}
+
+function restorePositions(){
+  const store = layout[mode] || {};
+  Object.entries(cardEls).forEach(([k, el]) => {
+    const p = store[k];
+    if(p){
+      el.style.left = p.x + 'px';
+      el.style.top = p.y + 'px';
+    }
+  });
+}
+
+// search runs on Enter only
+document.getElementById('search').addEventListener('keydown', e => {
+  if(e.key === 'Enter') filterCards();
 });
 
 function highlightRelated(item){
@@ -676,13 +742,10 @@ function relOf(item){
   return decodeURIComponent((item.src||'').replace(/^\/media\//, ''));
 }
 
+// org-protocol hands the note to the Emacs on the viewer's machine,
+// so the link works for remote canvases too
 function emacsButtonHtml(item){
-  return `<a class="emacs-open" title="open in Emacs" onclick="openInEmacs(event, '${encodeURIComponent(relOf(item))}')"><svg viewBox="0 0 512 512"><use href="#emacs-icon"/></svg></a>`;
-}
-
-function openInEmacs(e, rel){
-  e.stopPropagation();
-  fetch('/api/open?path=' + rel);
+  return `<a class="emacs-open" title="open in Emacs" href="org-protocol://vulpea-spatial?id=${encodeURIComponent(item.id)}" onclick="event.stopPropagation()" ondblclick="event.stopPropagation()"><svg viewBox="0 0 512 512"><use href="#emacs-icon"/></svg></a>`;
 }
 document.getElementById('lb-close').onclick = closeLightbox;
 document.getElementById('lightbox').addEventListener('click', e => {
@@ -752,13 +815,15 @@ function makeDraggable(el, resizeHandle){
     };
     const onUp = () => {
       el.classList.remove('dragging');
+      // positions are temporary while search compacts the grid
+      const persist = !(searchCompact && mode === 'chrono');
       if(dragMode === 'move'){
         selected.forEach(k => {
           const gEl = cardEls[k];
           if(!gEl) return;
-          layout[mode][k] = {x: gEl.offsetLeft, y: gEl.offsetTop, w: gEl.offsetWidth, h: gEl.offsetHeight};
+          if(persist) layout[mode][k] = {x: gEl.offsetLeft, y: gEl.offsetTop, w: gEl.offsetWidth, h: gEl.offsetHeight};
         });
-      } else {
+      } else if(persist){
         layout[mode][key] = {x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight};
       }
       document.removeEventListener('mousemove', onMove);

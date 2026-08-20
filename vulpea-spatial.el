@@ -72,6 +72,22 @@ If nil, `vulpea-spatial-open' uses `vulpea-db-location'."
   "Path to the bundled server.py."
   (expand-file-name "server.py" (vulpea-spatial--package-directory)))
 
+;; org-protocol handler: lets the canvas open a note in the Emacs of
+;; the machine the browser runs on, wherever the server is hosted.
+;; Links look like org-protocol://vulpea-spatial?id=<note-id>.
+(require 'org-protocol)
+
+(defun vulpea-spatial-protocol-open (plist)
+  "Visit the vulpea note whose id PLIST carries, and focus Emacs."
+  (when-let* ((id (plist-get plist :id)))
+    (vulpea-visit id)
+    (select-frame-set-input-focus (selected-frame)))
+  nil)
+
+(add-to-list 'org-protocol-protocol-alist
+             '("vulpea-spatial" :protocol "vulpea-spatial"
+               :function vulpea-spatial-protocol-open))
+
 (defun vulpea-spatial-export-html (path)
   "Export the org file at PATH to body-only HTML.
 Write the result to a temp file and return that file's name.
